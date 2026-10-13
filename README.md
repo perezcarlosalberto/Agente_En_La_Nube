@@ -6,13 +6,13 @@ el resultado en **Google Sheets**, que funciona como base de datos.
 
 Práctica 2 *"Mi Agente en la Nube"*: Desarrollo de Agentes Inteligentes, Unidad 2.
 Es la continuación de la Práctica 1: el mismo agente, pero ahora lo ejecuta **GitHub Actions
-cada 30 minutos**, aunque la computadora esté apagada.
+cada 5 minutos**, aunque la computadora esté apagada.
 
 ## Funcionamiento
 
 ```
 GitHub Actions  ──►  agente_soporte.py  ──►  Gemini AI  ──►  Google Sheets
-(cron: 30 min)       (--una-vez)             (análisis)      (base de datos)
+(cron: 5 min)        (--una-vez)             (análisis)      (base de datos)
 ```
 
 Cada ejecución del workflow:
@@ -41,7 +41,7 @@ Cada ejecución del workflow:
 
 ```
 agente-soporte/
-├── .github/workflows/agente.yml   # Workflow de GitHub Actions (cada 30 min + botón manual)
+├── .github/workflows/agente.yml   # Workflow de GitHub Actions (cada 5 min + botón manual)
 ├── agente_soporte.py              # Script del agente
 ├── requirements.txt               # Dependencias que instala el runner
 ├── .env.example                   # Plantilla de la API Key (sin la clave real)
@@ -82,9 +82,12 @@ La primera vez se abre el navegador para iniciar sesión con Google. El token se
 
 El workflow `.github/workflows/agente.yml` se dispara:
 
-- **`schedule`** con `cron: "*/30 * * * *"`: cada 30 minutos (hora UTC). GitHub puede
-  retrasar las ejecuciones programadas varios minutos.
+- **`schedule`** con `cron: "*/5 * * * *"`: cada 5 minutos (hora UTC), el intervalo mínimo que
+  permite GitHub. GitHub puede retrasar las ejecuciones programadas varios minutos.
 - **`workflow_dispatch`**: botón **Run workflow** en la pestaña *Actions* para probarlo al momento.
+
+Con `concurrency`, si una ejecución todavía no termina cuando llega la siguiente, la nueva espera
+su turno, así que dos ejecuciones nunca procesan la misma queja al mismo tiempo.
 
 Pasos del trabajo `ejecutar-agente` (en `ubuntu-latest`, límite de 10 minutos):
 
@@ -115,9 +118,9 @@ nuevo en el Secret `GOOGLE_TOKEN_JSON` con **Update secret**.
 ### Cuota de minutos
 
 Este repositorio es público, y en repositorios públicos GitHub Actions no descuenta minutos de la
-cuota gratuita. El intervalo de 30 minutos de la práctica está pensado para un repositorio privado
-(2,000 minutos al mes, y cada ejecución cuenta como mínimo 1 minuto): cada 30 minutos son unas
-1,440 ejecuciones al mes, que caben en esa cuota.
+cuota gratuita, por eso el agente puede correr cada 5 minutos. En un repositorio privado (2,000
+minutos al mes, y cada ejecución cuenta como mínimo 1 minuto) cada 5 minutos serían unas 8,640
+ejecuciones al mes y no cabrían; ahí habría que usar 30 minutos (unas 1,440 al mes), como indica la práctica.
 
 En repositorios públicos GitHub desactiva los workflows programados si el repositorio pasa 60 días
 sin actividad. Para reactivarlo basta con habilitarlo de nuevo en la pestaña *Actions* o hacer un commit.

@@ -3,11 +3,17 @@
 name: Agente de Soporte
 
 on:
-  # Cada 30 minutos (la hora del cron es UTC)
+  # Cada 5 minutos, el intervalo mínimo que permite GitHub (la hora del cron es UTC)
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/5 * * * *"
   # Botón "Run workflow" para ejecutarlo manualmente desde la pestaña Actions
   workflow_dispatch:
+
+# Si una ejecución todavía no termina cuando llega la siguiente, la nueva espera su turno.
+# Así dos ejecuciones nunca procesan la misma queja al mismo tiempo.
+concurrency:
+  group: agente-soporte
+  cancel-in-progress: false
 
 jobs:
   ejecutar-agente:
