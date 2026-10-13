@@ -1,0 +1,34 @@
+# Workflow de GitHub Actions: ejecuta el agente de soporte en los servidores de GitHub.
+# El script procesa las quejas pendientes una sola vez (--una-vez) y termina.
+name: Agente de Soporte
+
+on:
+  # Cada 30 minutos (la hora del cron es UTC)
+  schedule:
+    - cron: "*/30 * * * *"
+  # Botón "Run workflow" para ejecutarlo manualmente desde la pestaña Actions
+  workflow_dispatch:
+
+jobs:
+  ejecutar-agente:
+    runs-on: ubuntu-latest
+    # Si algo se queda trabado, GitHub lo detiene para no consumir la cuota gratuita
+    timeout-minutes: 10
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar el agente
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: python agente_soporte.py --una-vez
