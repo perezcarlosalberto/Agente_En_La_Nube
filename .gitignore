@@ -1,0 +1,19 @@
+# --- Credenciales y secretos: NUNCA subir a GitHub ---
+client_secrets.json
+client_secret*.json
+token_autorizado.json
+config_local.py
+.env
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- Editores y sistema ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
