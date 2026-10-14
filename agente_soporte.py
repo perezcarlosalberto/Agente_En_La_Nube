@@ -11,6 +11,7 @@ en las columnas D, E y F de la hoja de cálculo.
 Formas de ejecutarlo:
     python agente_soporte.py            -> modo normal: revisa cada INTERVALO_MINUTOS (Ctrl+C para salir)
     python agente_soporte.py --una-vez  -> un solo ciclo y termina (lo usa GitHub Actions)
+    python agente_soporte.py --reprocesar -> vuelve a clasificar TODAS las filas una vez y termina
 """
 
 # =====================================================================
@@ -26,6 +27,7 @@ import gspread   # Leer y escribir en Google Sheets
 from dotenv import load_dotenv    # Cargar la API Key desde el archivo .env
 from google import genai          # Cliente de la API de Gemini
 from google.genai import types    # Configuración de la petición a Gemini
+from google.genai import errors as genai_errors        # Errores de la API (saturado, sin cuota...)
 from google.oauth2.credentials import Credentials      # Credenciales a partir del token guardado
 from google.auth.transport.requests import Request     # Renovar el token sin abrir el navegador
 
@@ -64,9 +66,16 @@ NOMBRE_HOJA = "Respuestas de Quejas (Base de Datos)"
 TEXTO_MARCADOR = "PEGA_AQUI_TU_API_KEY"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", TEXTO_MARCADOR)
 
-# Modelo de Gemini que usa el agente.
-# El PDF indica "gemini-2.5-flash", pero Google ya no lo ofrece a usuarios nuevos.
-MODELO_GEMINI = "gemini-3.1-flash-lite"   # Gemini 3.1 Flash Lite
+# Modelos de Gemini que usa el agente, en orden de preferencia.
+# Si el primero falla (saturado, sin cuota o retirado), se intenta con el siguiente.
+MODELOS_GEMINI = [
+    "gemini-3.5-flash-lite",   # Principal: Gemini 3.5 Flash Lite
+    "gemini-3.1-flash-lite",   # Respaldo: Gemini 3.1 Flash Lite
+]
+
+# Únicas respuestas válidas: Gemini está obligado a elegir una de cada lista
+CATEGORIAS = ["Ventas", "Soporte Técnico", "Logística"]
+SENTIMIENTOS = ["Positivo", "Negativo", "Neutro"]
 
 # Cada cuántos minutos el agente revisa si hay nuevas quejas
 INTERVALO_MINUTOS = 1
@@ -125,33 +134,57 @@ def conectar_sheets():
 # =====================================================================
 # 5. ANALIZAR CON GEMINI (Paso 4.5)
 # =====================================================================
-def analizar_con_gemini(comentario):
-    """Envía el comentario a Gemini y devuelve {'clasificacion', 'sentimiento'}."""
-    # Instrucción del sistema: el "rol" del agente
-    instruccion_sistema = (
-        "Eres un analista de soporte al cliente. Tu única tarea es devolver "
-        "una respuesta en formato JSON válido, sin texto adicional, sin "
-        "explicaciones y sin bloques de código."
-    )
+# Instrucción del sistema: el "rol" del agente y los criterios para clasificar.
+# Los ejemplos son los resultados esperados de la Práctica 1 (Paso 5.2) y las correcciones del alumno.
+INSTRUCCION_SISTEMA = """Eres un analista de soporte al cliente de una tienda. Tu única tarea es clasificar el comentario de un cliente y devolver un JSON.
 
-    # Instrucción del usuario: el comentario y lo que queremos obtener
-    instruccion_usuario = f"""Analiza el siguiente comentario de un cliente:
+CATEGORÍAS (elige exactamente una):
+- Ventas: el producto en sí (calidad, defectos, que no sirva, que no sea lo que el cliente esperaba, si lo recomienda o no); el proceso de compra cuando NO se menciona una falla de la app o de la página; precios, promociones, descuentos, disponibilidad, pagos, cobros, facturas, cambios y devoluciones; y la atención del personal o la atención al cliente en general (vendedores, trato, amabilidad).
+- Soporte Técnico: fallas de la app, la página web o el sistema (se cierra, marca error, no carga, no deja iniciar sesión, error al pagar en la página); dudas sobre cómo usar, instalar, configurar o actualizar la app o el producto; ayuda técnica.
+- Logística: envío y entrega: retrasos, pedidos que no llegan o que llegan antes o a tiempo, paquetería, rastreo, dirección de entrega, empaque, y productos que llegan golpeados o dañados por el transporte.
 
-"{comentario}"
+REGLAS:
+1. Si el comentario mezcla varios temas, elige el problema principal: el más grave o, si pesan igual, el que se menciona primero.
+2. Un producto defectuoso o que no sirve es Ventas; un producto golpeado o dañado durante el envío es Logística.
+3. Un problema para comprar o pagar es Ventas, salvo que mencione una falla de la app o de la página (entonces es Soporte Técnico).
 
-1. Clasifícalo en UNA sola de estas categorías: Ventas, Soporte Técnico o Logística.
-2. Detecta su sentimiento: Positivo, Negativo o Neutro.
+SENTIMIENTO (elige exactamente uno):
+- Positivo: satisfacción, elogios o agradecimiento.
+- Negativo: quejas, molestia o insatisfacción, incluido el sarcasmo ("Genial, otra vez se cerró la app").
+- Neutro: preguntas, solicitudes de información o comentarios sin una emoción clara.
+Si hay emociones mezcladas, elige la que predomina.
 
-Responde únicamente con un JSON con esta estructura exacta:
-{{"clasificacion": "<categoría>", "sentimiento": "<sentimiento>"}}"""
+EJEMPLOS:
+"No entiendo cómo funciona la nueva app, el botón de ayuda no sirve." -> Soporte Técnico / Negativo
+"Me atendió un vendedor llamado Juan y fue increíble, ¡resolvió todo! 10/10." -> Ventas / Positivo
+"Mi paquete lleva 2 semanas sin llegar y nadie me da información." -> Logística / Negativo
+"Tuve problemas para realizar la compra" -> Ventas / Negativo
+"No me sirvió el producto, no lo recomiendo" -> Ventas / Negativo"""
+
+# Estructura obligatoria de la respuesta: Gemini solo puede elegir valores de estas listas
+ESQUEMA_RESPUESTA = types.Schema(
+    type=types.Type.OBJECT,
+    properties={
+        "clasificacion": types.Schema(type=types.Type.STRING, enum=CATEGORIAS),
+        "sentimiento": types.Schema(type=types.Type.STRING, enum=SENTIMIENTOS),
+    },
+    required=["clasificacion", "sentimiento"],
+)
+
+
+def consultar_modelo(modelo, comentario):
+    """Pide a un modelo de Gemini que analice el comentario y devuelve el resultado validado."""
+    # Instrucción del usuario: el comentario a analizar
+    instruccion_usuario = f'Comentario del cliente: "{comentario}"'
 
     # Llamada a la API de Gemini
     respuesta = cliente_gemini.models.generate_content(
-        model=MODELO_GEMINI,
+        model=modelo,
         contents=instruccion_usuario,
         config=types.GenerateContentConfig(
-            system_instruction=instruccion_sistema,
-            response_mime_type="application/json",  # refuerza que responda JSON puro
+            system_instruction=INSTRUCCION_SISTEMA,
+            response_mime_type="application/json",  # responder JSON puro
+            response_schema=ESQUEMA_RESPUESTA,      # solo valores permitidos
             temperature=0,                          # respuestas consistentes
             # No usamos herramientas; desactivarlo evita un aviso innecesario en pantalla
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -165,21 +198,43 @@ Responde únicamente con un JSON con esta estructura exacta:
     # Convertir el texto JSON en diccionario (lanza JSONDecodeError si no es válido)
     resultado = json.loads(texto)
 
-    return {
-        "clasificacion": resultado.get("clasificacion", "Sin clasificar"),
-        "sentimiento": resultado.get("sentimiento", "Sin sentimiento"),
-    }
+    clasificacion = resultado.get("clasificacion")
+    sentimiento = resultado.get("sentimiento")
+    if clasificacion not in CATEGORIAS or sentimiento not in SENTIMIENTOS:
+        # No se escribe nada raro en la hoja: la fila queda pendiente para el siguiente ciclo
+        raise ValueError(f"respuesta fuera de las opciones permitidas: {resultado}")
+
+    return {"clasificacion": clasificacion, "sentimiento": sentimiento}
+
+
+def analizar_con_gemini(comentario):
+    """Envía el comentario a Gemini y devuelve {'clasificacion', 'sentimiento'}.
+
+    Prueba los modelos de MODELOS_GEMINI en orden: si uno falla (saturado, sin cuota
+    o retirado), intenta con el siguiente. Si todos fallan, lanza el último error.
+    """
+    ultimo_error = None
+    for modelo in MODELOS_GEMINI:
+        try:
+            return consultar_modelo(modelo, comentario)
+        except genai_errors.APIError as error:
+            print(f"    Aviso: el modelo {modelo} falló ({error.code} {error.status}); probando el siguiente...")
+            ultimo_error = error
+
+    raise ultimo_error
 
 
 # =====================================================================
 # 6. AGENTE PRINCIPAL (Paso 4.6)
 # =====================================================================
-def ejecutar_agente():
+def ejecutar_agente(reprocesar=False):
     """Un ciclo completo: conectar, leer, filtrar, analizar y escribir.
 
+    Con reprocesar=True vuelve a analizar también las filas que ya tenían "SI".
     Devuelve False si no se pudo conectar a Google Sheets y True si el ciclo terminó.
     """
-    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Revisando nuevas quejas...")
+    accion = "Reclasificando todas las quejas" if reprocesar else "Revisando nuevas quejas"
+    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {accion}...")
 
     # 1) Conectar y 2) Leer todas las filas
     try:
@@ -196,7 +251,7 @@ def ejecutar_agente():
     # La fila 2 de la hoja es el primer registro real
     for numero_fila, fila in enumerate(filas, start=2):
         # 3) Filtrar: si la columna F ya dice "SI", esa fila ya fue procesada
-        if obtener_celda(fila, COL_EJECUTADO).upper() == "SI":
+        if not reprocesar and obtener_celda(fila, COL_EJECUTADO).upper() == "SI":
             ya_procesadas += 1
             continue
 
@@ -220,11 +275,15 @@ def ejecutar_agente():
         print(f"    Clasificación: {analisis['clasificacion']}")
         print(f"    Sentimiento:   {analisis['sentimiento']}")
 
-        # 5) Escribir resultados en D, E y marcar F con "SI"
+        # 5) Escribir resultados en D, E y marcar F con "SI" (una sola escritura para las 3 celdas,
+        #    así no se rebasa el límite de escrituras por minuto de Google Sheets)
         try:
-            hoja.update_cell(numero_fila, COL_CLASIFICACION, analisis["clasificacion"])
-            hoja.update_cell(numero_fila, COL_SENTIMIENTO, analisis["sentimiento"])
-            hoja.update_cell(numero_fila, COL_EJECUTADO, "SI")
+            rango = (f"{gspread.utils.rowcol_to_a1(numero_fila, COL_CLASIFICACION)}:"
+                     f"{gspread.utils.rowcol_to_a1(numero_fila, COL_EJECUTADO)}")
+            hoja.update(
+                range_name=rango,
+                values=[[analisis["clasificacion"], analisis["sentimiento"], "SI"]],
+            )
             print(f"    -> Resultados escritos en Google Sheets (fila {numero_fila}).")
             procesadas += 1
         except Exception as error:
@@ -235,7 +294,10 @@ def ejecutar_agente():
     else:
         print(f"  Ciclo terminado: {procesadas} queja(s) procesada(s).")
 
-    print(f"  Resumen: {ya_procesadas} fila(s) ya procesada(s) | {procesadas} fila(s) nueva(s) procesada(s).")
+    if reprocesar:
+        print(f"  Resumen: {procesadas} fila(s) reclasificada(s).")
+    else:
+        print(f"  Resumen: {ya_procesadas} fila(s) ya procesada(s) | {procesadas} fila(s) nueva(s) procesada(s).")
     return True
 
 
@@ -259,22 +321,27 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     # Inicializar el cliente de Gemini (variable global usada por analizar_con_gemini).
-    # Si Gemini está saturado (errores 429/503/504), reintenta solo hasta 5 veces.
+    # Si Gemini está saturado (errores 429/503/504), reintenta hasta 3 veces con el mismo
+    # modelo; después analizar_con_gemini() pasa al modelo de respaldo.
     cliente_gemini = genai.Client(
         api_key=GEMINI_API_KEY.strip(),
         http_options=types.HttpOptions(
-            retry_options=types.HttpRetryOptions(attempts=5, initial_delay=2, max_delay=30),
+            retry_options=types.HttpRetryOptions(attempts=3, initial_delay=2, max_delay=30),
         ),
     )
 
-    # Modo "una vez" (GitHub Actions): un solo ciclo y terminar.
+    # Modo "una vez" (GitHub Actions) y modo "reprocesar": un solo ciclo y terminar.
     # El código de salida le indica a GitHub si salió bien (0 = verde) o mal (1 = rojo).
-    if "--una-vez" in sys.argv:
+    reprocesar = "--reprocesar" in sys.argv
+    if "--una-vez" in sys.argv or reprocesar:
         print("=" * 60)
-        print(" Agente de Soporte: ejecución única (--una-vez)")
+        if reprocesar:
+            print(" Agente de Soporte: reclasificar todas las filas (--reprocesar)")
+        else:
+            print(" Agente de Soporte: ejecución única (--una-vez)")
         print(f" Hoja: '{NOMBRE_HOJA}'")
         print("=" * 60)
-        exito = ejecutar_agente()
+        exito = ejecutar_agente(reprocesar=reprocesar)
         sys.exit(0 if exito else 1)
 
     print("=" * 60)

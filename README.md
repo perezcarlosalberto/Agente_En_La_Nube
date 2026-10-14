@@ -26,6 +26,27 @@ Cada ejecución del workflow:
 5. **Termina:** muestra el resumen (filas ya procesadas y nuevas) y sale con código `0`
    (o `1` si no pudo conectarse a Google Sheets, y GitHub marca la ejecución en rojo).
 
+### Criterios de clasificación
+
+Gemini recibe estas definiciones en la instrucción del sistema y responde con salida estructurada
+(un esquema JSON con `enum`), así que **solo puede devolver una de las tres categorías y uno de
+los tres sentimientos**.
+
+| Categoría | Incluye |
+|---|---|
+| **Ventas** | El producto en sí (calidad, defectos, que no sirva o no sea lo esperado), el proceso de compra cuando no se menciona una falla de la app, precios, promociones, pagos, cobros, facturas, cambios y devoluciones, y la atención del personal o al cliente |
+| **Soporte Técnico** | Fallas de la app, la página o el sistema (incluido un error al pagar en la página), dudas para usar, instalar, configurar o actualizar, y ayuda técnica |
+| **Logística** | Envío y entrega: retrasos, pedidos que no llegan o llegan a tiempo, paquetería, rastreo, dirección, empaque y productos dañados durante el transporte |
+
+Reglas para casos dudosos:
+
+1. Si el comentario mezcla temas, gana el **problema principal** (el más grave o, si pesan igual, el primero que se menciona).
+2. Producto defectuoso o que no sirve → **Ventas**; producto golpeado en el envío → **Logística**.
+3. Problema para comprar → **Ventas**, salvo que mencione una falla de la app o la página → **Soporte Técnico**.
+
+Sentimiento: **Positivo** (satisfacción, elogios), **Negativo** (quejas, molestia, sarcasmo) o
+**Neutro** (preguntas o comentarios sin emoción clara).
+
 ### Estructura de la hoja de cálculo
 
 | Columna | Encabezado | La llena |
@@ -71,9 +92,13 @@ pip install -r requirements.txt
 3. Ejecutar:
 
 ```bash
-python agente_soporte.py            # modo normal: revisa cada minuto (Ctrl+C para detener)
-python agente_soporte.py --una-vez  # un solo ciclo y termina (como en GitHub Actions)
+python agente_soporte.py               # modo normal: revisa cada minuto (Ctrl+C para detener)
+python agente_soporte.py --una-vez     # un solo ciclo y termina (como en GitHub Actions)
+python agente_soporte.py --reprocesar  # vuelve a clasificar TODAS las filas, aunque ya digan SI
 ```
+
+`--reprocesar` sirve cuando cambian los criterios de clasificación: sobrescribe las columnas D y E
+de todas las filas con el criterio actual.
 
 La primera vez se abre el navegador para iniciar sesión con Google. El token se guarda en
 `token_autorizado.json` y no se vuelve a pedir.
@@ -137,14 +162,21 @@ sin actividad. Para reactivarlo basta con habilitarlo de nuevo en la pestaña *A
 | `Invalid workflow file` | Revisar la sangría del YAML: espacios, nunca tabuladores |
 | `ModuleNotFoundError` en GitHub | Agregar la librería a `requirements.txt` y hacer push |
 | `SpreadsheetNotFound` | El nombre de la hoja debe coincidir exactamente con `NOMBRE_HOJA` |
-| `404 NOT_FOUND` (modelo) | Cambiar `MODELO_GEMINI` por un modelo disponible en AI Studio |
-| `503 UNAVAILABLE` | Gemini está saturado; el agente reintenta y, si no, en la siguiente ejecución |
+| `404 NOT_FOUND` (modelo) | El modelo fue retirado: cambiarlo en `MODELOS_GEMINI` por uno disponible en AI Studio |
+| `503 UNAVAILABLE` | Gemini está saturado; el agente reintenta, pasa al modelo de respaldo y, si todo falla, la fila queda para la siguiente ejecución |
 
 ## Notas
 
-- **Modelo:** el agente usa `gemini-3.1-flash-lite`, configurable en `MODELO_GEMINI`.
+- **Modelos:** el agente usa `gemini-3.5-flash-lite` y, si falla, `gemini-3.1-flash-lite` como
+  respaldo (lista `MODELOS_GEMINI`). Se eligieron comparando varios modelos con 39 comentarios
+  etiquetados: los dos clasificaron bien todas las respuestas, pero `gemini-3.1-flash-lite`
+  estaba saturado (error 503) en más de la mitad de las peticiones, y `gemini-3.5-flash` no tiene
+  cuota en el plan gratuito.
 - **Reintentos:** si Gemini está saturado (errores 429, 503 o 504), la petición se reintenta
-  hasta 5 veces; si aun así falla, la fila queda pendiente para la siguiente ejecución.
+  hasta 3 veces con el mismo modelo y después se intenta con el de respaldo; si aun así falla,
+  la fila queda pendiente para la siguiente ejecución.
+- **Escritura:** las columnas D, E y F de cada fila se escriben en una sola operación, para no
+  rebasar el límite de escrituras por minuto de Google Sheets.
 - **Visibilidad:** el repositorio es público para que cualquier persona pueda consultarlo.
   Los registros de cada ejecución (pestaña *Actions*) muestran el nombre de cada cliente con la
   clasificación y el sentimiento de su queja, así que también son visibles para todos. Los
