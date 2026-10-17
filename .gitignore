@@ -4,6 +4,7 @@ client_secret*.json
 token_autorizado.json
 config_local.py
 .env
+token.env
 
 # --- Python ---
 __pycache__/

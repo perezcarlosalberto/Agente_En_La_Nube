@@ -1,0 +1,14 @@
+# Archivos que NUNCA se envían al motor de Docker ni entran a la imagen
+
+# API Key de Gemini
+.env
+# Token de Google para el contenedor (Fase 4)
+token.env
+# Credenciales OAuth de la aplicación
+client_secrets.json
+# Token de Google guardado al iniciar sesión con el navegador
+token_autorizado.json
+# Historial de Git: el contenedor no lo necesita
+.git
+# Archivos temporales de Python
+__pycache__/
